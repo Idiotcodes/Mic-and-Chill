@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { 
   BarChart3, 
   Podcast, 
@@ -21,9 +22,12 @@ import {
   Plus, 
   Activity,
   Mic,
-  Clock
+  Clock,
+  UserPlus,
+  Trash2,
+  Edit
 } from "lucide-react";
-import type { PodcastWithHost, InsertPodcast } from "@shared/schema";
+import type { PodcastWithHost, InsertPodcast, User } from "@shared/schema";
 
 interface AdminStats {
   totalPodcasts: number;
@@ -36,6 +40,8 @@ export default function AdminDashboard() {
   const { toast } = useToast();
   const { user, isAuthenticated, isLoading } = useAuth();
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [selectedPodcast, setSelectedPodcast] = useState<PodcastWithHost | null>(null);
+  const [selectedGuests, setSelectedGuests] = useState<string[]>([]);
   const [formData, setFormData] = useState<Partial<InsertPodcast>>({
     title: '',
     description: '',
@@ -76,6 +82,11 @@ export default function AdminDashboard() {
     retry: false,
   });
 
+  const { data: users = [] } = useQuery<User[]>({
+    queryKey: ["/api/users"],
+    retry: false,
+  });
+
   const createPodcastMutation = useMutation({
     mutationFn: async (data: InsertPodcast) => {
       const response = await apiRequest('POST', '/api/podcasts', data);
@@ -87,6 +98,7 @@ export default function AdminDashboard() {
         description: "Podcast created successfully",
       });
       setShowCreateForm(false);
+      setSelectedGuests([]);
       setFormData({ title: '', description: '', scheduledAt: undefined, status: 'draft' });
       queryClient.invalidateQueries({ queryKey: ["/api/podcasts"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/stats"] });
@@ -125,6 +137,27 @@ export default function AdminDashboard() {
     }
   }, [statsError, toast]);
 
+  const addGuestMutation = useMutation({
+    mutationFn: async ({ podcastId, guestId, role }: { podcastId: string; guestId: string; role: string }) => {
+      const response = await apiRequest('POST', `/api/podcasts/${podcastId}/guests`, { guestId, role });
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Success", description: "Guest added successfully" });
+      queryClient.invalidateQueries({ queryKey: ["/api/podcasts"] });
+    },
+  });
+
+  const removeGuestMutation = useMutation({
+    mutationFn: async ({ podcastId, guestId }: { podcastId: string; guestId: string }) => {
+      await apiRequest('DELETE', `/api/podcasts/${podcastId}/guests/${guestId}`);
+    },
+    onSuccess: () => {
+      toast({ title: "Success", description: "Guest removed successfully" });
+      queryClient.invalidateQueries({ queryKey: ["/api/podcasts"] });
+    },
+  });
+
   const handleCreatePodcast = (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.title || !formData.description) {
@@ -136,7 +169,27 @@ export default function AdminDashboard() {
       return;
     }
 
-    createPodcastMutation.mutate(formData as InsertPodcast);
+    // Convert datetime-local to proper date
+    const podcastData = {
+      ...formData,
+      scheduledAt: formData.scheduledAt ? new Date(formData.scheduledAt) : undefined
+    } as InsertPodcast;
+
+    createPodcastMutation.mutate(podcastData as InsertPodcast);
+  };
+
+  const handleAddGuest = (podcastId: string, guestId: string) => {
+    addGuestMutation.mutate({ podcastId, guestId, role: 'guest' });
+  };
+
+  const handleRemoveGuest = (podcastId: string, guestId: string) => {
+    removeGuestMutation.mutate({ podcastId, guestId });
+  };
+
+  const formatDateTime = (date: Date | string | null) => {
+    if (!date) return '';
+    const d = new Date(date);
+    return d.toISOString().slice(0, 16);
   };
 
   if (isLoading || !user) {
@@ -285,10 +338,10 @@ export default function AdminDashboard() {
                       <Input
                         id="scheduledAt"
                         type="datetime-local"
-                        value={formData.scheduledAt ? new Date(formData.scheduledAt).toISOString().slice(0, 16) : ''}
+                        value={formData.scheduledAt ? formatDateTime(formData.scheduledAt) : ''}
                         onChange={(e) => setFormData({ 
                           ...formData, 
-                          scheduledAt: e.target.value ? new Date(e.target.value) : undefined 
+                          scheduledAt: e.target.value || undefined
                         })}
                         data-testid="input-scheduled-time"
                       />
@@ -311,6 +364,31 @@ export default function AdminDashboard() {
                       </Select>
                     </div>
                   </div>
+                  
+                  {/* Guest Selection */}
+                  <div>
+                    <Label>Select Guests (Optional)</Label>
+                    <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto border rounded p-2">
+                      {users.filter(u => u.id !== user?.id).map((availableUser) => (
+                        <label key={availableUser.id} className="flex items-center space-x-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={selectedGuests.includes(availableUser.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedGuests([...selectedGuests, availableUser.id]);
+                              } else {
+                                setSelectedGuests(selectedGuests.filter(id => id !== availableUser.id));
+                              }
+                            }}
+                            className="rounded"
+                          />
+                          <span>{availableUser.firstName} {availableUser.lastName}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  
                   <div className="flex gap-2">
                     <Button 
                       type="submit" 
@@ -371,26 +449,92 @@ export default function AdminDashboard() {
               ) : (
                 <div className="space-y-4 max-h-96 overflow-y-auto" data-testid="list-recent-podcasts">
                   {podcasts.slice(0, 10).map((podcast) => (
-                    <div key={podcast.id} className="flex items-center justify-between p-3 rounded-lg hover:bg-muted/50">
-                      <div className="flex items-center space-x-3">
-                        <div className="w-8 h-8 bg-primary/10 rounded flex items-center justify-center">
-                          <Podcast className="h-4 w-4 text-primary" />
+                    <div key={podcast.id} className="p-4 rounded-lg hover:bg-muted/50 border">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center space-x-3">
+                          <div className="w-8 h-8 bg-primary/10 rounded flex items-center justify-center">
+                            <Podcast className="h-4 w-4 text-primary" />
+                          </div>
+                          <div>
+                            <p className="text-foreground font-medium text-sm" data-testid={`text-podcast-title-${podcast.id}`}>
+                              {podcast.title}
+                            </p>
+                            <p className="text-muted-foreground text-xs">
+                              by {podcast.host?.firstName} {podcast.host?.lastName}
+                            </p>
+                            {podcast.scheduledAt && (
+                              <p className="text-muted-foreground text-xs">
+                                📅 {new Date(podcast.scheduledAt).toLocaleString()}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                        <div>
-                          <p className="text-foreground font-medium text-sm" data-testid={`text-podcast-title-${podcast.id}`}>
-                            {podcast.title}
-                          </p>
-                          <p className="text-muted-foreground text-xs">
-                            by {podcast.host?.firstName} {podcast.host?.lastName}
-                          </p>
+                        <div className="flex items-center space-x-2">
+                          <Badge 
+                            variant={podcast.status === 'live' ? 'destructive' : 'secondary'}
+                            data-testid={`badge-status-${podcast.id}`}
+                          >
+                            {podcast.status}
+                          </Badge>
+                          <Dialog>
+                            <DialogTrigger asChild>
+                              <Button size="sm" variant="outline">
+                                <UserPlus className="h-4 w-4" />
+                              </Button>
+                            </DialogTrigger>
+                            <DialogContent>
+                              <DialogHeader>
+                                <DialogTitle>Manage Guests - {podcast.title}</DialogTitle>
+                              </DialogHeader>
+                              <div className="space-y-4">
+                                <div>
+                                  <h4 className="font-medium mb-2">Current Guests</h4>
+                                  {podcast.guests && podcast.guests.length > 0 ? (
+                                    <div className="space-y-2">
+                                      {podcast.guests.map((guest) => (
+                                        <div key={guest.id} className="flex items-center justify-between p-2 bg-muted rounded">
+                                          <span className="text-sm">
+                                            {guest.guest.firstName} {guest.guest.lastName} ({guest.role})
+                                          </span>
+                                          <Button
+                                            size="sm"
+                                            variant="destructive"
+                                            onClick={() => handleRemoveGuest(podcast.id, guest.guestId)}
+                                          >
+                                            <Trash2 className="h-3 w-3" />
+                                          </Button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-muted-foreground text-sm">No guests added yet</p>
+                                  )}
+                                </div>
+                                <div>
+                                  <h4 className="font-medium mb-2">Add Guest</h4>
+                                  <div className="space-y-2">
+                                    {users.filter(u => u.id !== podcast.hostId && !podcast.guests?.some(g => g.guestId === u.id)).map((availableUser) => (
+                                      <div key={availableUser.id} className="flex items-center justify-between p-2 bg-muted/50 rounded">
+                                        <span className="text-sm">
+                                          {availableUser.firstName} {availableUser.lastName}
+                                        </span>
+                                        <Button
+                                          size="sm"
+                                          onClick={() => handleAddGuest(podcast.id, availableUser.id)}
+                                          disabled={addGuestMutation.isPending}
+                                        >
+                                          <Plus className="h-3 w-3 mr-1" />
+                                          Add
+                                        </Button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            </DialogContent>
+                          </Dialog>
                         </div>
                       </div>
-                      <Badge 
-                        variant={podcast.status === 'live' ? 'destructive' : 'secondary'}
-                        data-testid={`badge-status-${podcast.id}`}
-                      >
-                        {podcast.status}
-                      </Badge>
                     </div>
                   ))}
                 </div>

@@ -11,6 +11,7 @@ interface AudioPlayerProps {
     host: string;
     imageUrl?: string;
     isLive?: boolean;
+    url?: string;
   };
 }
 
@@ -21,14 +22,10 @@ export default function AudioPlayer({ currentPodcast }: AudioPlayerProps) {
   const [volume, setVolume] = useState(0.8);
   const audioRef = useRef<HTMLAudioElement>(null);
 
-  // Mock current podcast if none provided
-  const mockPodcast = currentPodcast || {
-    id: 'mock-1',
-    title: 'Tech Talk Tuesday',
-    host: 'Alex Chen',
-    imageUrl: 'https://images.unsplash.com/photo-1590602847861-f357a9332bbc?ixlib=rb-4.0.3&auto=format&fit=crop&w=48&h=48',
-    isLive: true,
-  };
+  // Only show if there's an actual current podcast
+  if (!currentPodcast) return null;
+
+  const mockPodcast = currentPodcast;
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -81,8 +78,14 @@ export default function AudioPlayer({ currentPodcast }: AudioPlayerProps) {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  // Only show player if there's a current podcast
-  if (!mockPodcast && !currentPodcast) return null;
+  // Simulate loading audio stream for live podcasts
+  useEffect(() => {
+    if (mockPodcast.isLive && isPlaying) {
+      // Simulate connecting to live stream
+      console.log('Connecting to live stream:', mockPodcast.id);
+      // In a real app, this would connect to a WebRTC stream or similar
+    }
+  }, [isPlaying, mockPodcast.isLive, mockPodcast.id]);
 
   return (
     <div className="fixed bottom-0 left-0 right-0 bg-card/90 backdrop-blur-sm border-t border-border z-40">
