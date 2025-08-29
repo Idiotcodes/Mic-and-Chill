@@ -27,6 +27,7 @@ import {
   Trash2,
   Edit
 } from "lucide-react";
+import LiveBroadcastStudio from "@/components/LiveBroadcastStudio";
 import type { PodcastWithHost, InsertPodcast, User } from "@shared/schema";
 
 interface AdminStats {
@@ -42,6 +43,9 @@ export default function AdminDashboard() {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [selectedPodcast, setSelectedPodcast] = useState<PodcastWithHost | null>(null);
   const [selectedGuests, setSelectedGuests] = useState<string[]>([]);
+  const [guestUsername, setGuestUsername] = useState('');
+  const [showBroadcastStudio, setShowBroadcastStudio] = useState(false);
+  const [currentBroadcast, setCurrentBroadcast] = useState<PodcastWithHost | null>(null);
   const [formData, setFormData] = useState<Partial<InsertPodcast>>({
     title: '',
     description: '',
@@ -85,6 +89,52 @@ export default function AdminDashboard() {
   const { data: users = [] } = useQuery<User[]>({
     queryKey: ["/api/users"],
     retry: false,
+  });
+
+  const searchUserMutation = useMutation({
+    mutationFn: async (username: string) => {
+      const response = await apiRequest('GET', `/api/users/search?username=${encodeURIComponent(username)}`);
+      return response.json();
+    },
+    onSuccess: (foundUser: User) => {
+      if (!selectedGuests.includes(foundUser.id)) {
+        setSelectedGuests([...selectedGuests, foundUser.id]);
+        toast({ title: "Success", description: `Added ${foundUser.firstName} ${foundUser.lastName} as guest` });
+      }
+      setGuestUsername('');
+    },
+    onError: () => {
+      toast({ 
+        title: "User Not Found", 
+        description: "No user found with that username",
+        variant: "destructive" 
+      });
+    }
+  });
+
+  const handleSearchAndAddGuest = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (guestUsername.trim()) {
+      searchUserMutation.mutate(guestUsername.trim());
+    }
+  };
+
+  const startBroadcasting = (podcast: PodcastWithHost) => {
+    setCurrentBroadcast(podcast);
+    setShowBroadcastStudio(true);
+  };
+
+  // Go live mutation for quick actions
+  const goLiveMutation = useMutation({
+    mutationFn: async (podcastId: string) => {
+      const response = await apiRequest('PATCH', `/api/podcasts/${podcastId}/status`, { status: 'live' });
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Success", description: "Podcast is now live!" });
+      queryClient.invalidateQueries({ queryKey: ["/api/podcasts"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/stats"] });
+    }
   });
 
   const createPodcastMutation = useMutation({
@@ -194,6 +244,26 @@ export default function AdminDashboard() {
 
   if (isLoading || !user) {
     return <div>Loading...</div>;
+  }
+
+  if (showBroadcastStudio && currentBroadcast) {
+    return (
+      <div className="container mx-auto p-6">
+        <div className="mb-4">
+          <Button 
+            variant="outline" 
+            onClick={() => setShowBroadcastStudio(false)}
+          >
+            ← Back to Dashboard
+          </Button>
+        </div>
+        <LiveBroadcastStudio 
+          podcast={currentBroadcast} 
+          user={user} 
+          onClose={() => setShowBroadcastStudio(false)}
+        />
+      </div>
+    );
   }
 
   return (
@@ -367,26 +437,46 @@ export default function AdminDashboard() {
                   
                   {/* Guest Selection */}
                   <div>
-                    <Label>Select Guests (Optional)</Label>
-                    <div className="grid grid-cols-2 gap-2 max-h-32 overflow-y-auto border rounded p-2">
-                      {users.filter(u => u.id !== user?.id).map((availableUser) => (
-                        <label key={availableUser.id} className="flex items-center space-x-2 text-sm">
-                          <input
-                            type="checkbox"
-                            checked={selectedGuests.includes(availableUser.id)}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setSelectedGuests([...selectedGuests, availableUser.id]);
-                              } else {
-                                setSelectedGuests(selectedGuests.filter(id => id !== availableUser.id));
-                              }
-                            }}
-                            className="rounded"
-                          />
-                          <span>{availableUser.firstName} {availableUser.lastName}</span>
-                        </label>
-                      ))}
-                    </div>
+                    <Label>Add Guests by Username</Label>
+                    <form onSubmit={handleSearchAndAddGuest} className="flex space-x-2 mb-3">
+                      <Input
+                        placeholder="Enter username to add as guest"
+                        value={guestUsername}
+                        onChange={(e) => setGuestUsername(e.target.value)}
+                        data-testid="input-guest-username"
+                      />
+                      <Button 
+                        type="submit" 
+                        variant="outline" 
+                        disabled={searchUserMutation.isPending}
+                        data-testid="button-search-user"
+                      >
+                        {searchUserMutation.isPending ? "Searching..." : "Add Guest"}
+                      </Button>
+                    </form>
+                    
+                    {selectedGuests.length > 0 && (
+                      <div>
+                        <p className="text-sm font-medium mb-2">Selected Guests:</p>
+                        <div className="space-y-1">
+                          {selectedGuests.map(guestId => {
+                            const guest = users.find(u => u.id === guestId);
+                            return guest ? (
+                              <div key={guestId} className="flex items-center justify-between p-2 bg-muted rounded text-sm">
+                                <span>{guest.firstName} {guest.lastName} (@{guest.username})</span>
+                                <Button
+                                  size="sm"
+                                  variant="destructive"
+                                  onClick={() => setSelectedGuests(selectedGuests.filter(id => id !== guestId))}
+                                >
+                                  Remove
+                                </Button>
+                              </div>
+                            ) : null;
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   
                   <div className="flex gap-2">
@@ -476,6 +566,16 @@ export default function AdminDashboard() {
                           >
                             {podcast.status}
                           </Badge>
+                          {podcast.status === 'live' && (
+                            <Button 
+                              size="sm" 
+                              onClick={() => startBroadcasting(podcast)}
+                              className="bg-red-600 hover:bg-red-700"
+                              data-testid={`button-join-live-${podcast.id}`}
+                            >
+                              <Mic className="h-4 w-4" />
+                            </Button>
+                          )}
                           <Dialog>
                             <DialogTrigger asChild>
                               <Button size="sm" variant="outline">

@@ -4,6 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Clock, Calendar, Mic, Play, Pause, Volume2 } from "lucide-react";
 import { useState } from "react";
+import LiveBroadcastStudio from "./LiveBroadcastStudio";
+import { useAuth } from "@/hooks/useAuth";
 import type { PodcastWithHost } from "@shared/schema";
 
 interface PodcastCardProps {
@@ -72,7 +74,9 @@ function LivePodcastPlayer({ podcast, onClose }: { podcast: PodcastWithHost; onC
 }
 
 export default function PodcastCard({ podcast, isLive, isUpcoming }: PodcastCardProps) {
+  const { user } = useAuth();
   const [showPlayer, setShowPlayer] = useState(false);
+  const [showBroadcastStudio, setShowBroadcastStudio] = useState(false);
   
   const formatScheduledTime = (date: Date | string | null) => {
     if (!date) return "TBD";
@@ -83,9 +87,18 @@ export default function PodcastCard({ podcast, isLive, isUpcoming }: PodcastCard
     });
   };
 
+  const isHost = user?.id === podcast.hostId;
+  const isGuest = podcast.guests?.some(g => g.guestId === user?.id);
+
   const handleJoinClick = () => {
     if (isLive) {
-      setShowPlayer(true);
+      if (isHost || isGuest) {
+        // Hosts and guests get the broadcast studio
+        setShowBroadcastStudio(true);
+      } else {
+        // Listeners get the simple player
+        setShowPlayer(true);
+      }
     } else {
       // For non-live podcasts, could redirect to recording or show info
       alert(`This podcast is ${podcast.status}. ${podcast.recordingUrl ? 'Recording available!' : 'No recording available yet.'}`);
@@ -197,23 +210,40 @@ export default function PodcastCard({ podcast, isLive, isUpcoming }: PodcastCard
             </span>
           </div>
           {isLive ? (
-            <Dialog open={showPlayer} onOpenChange={setShowPlayer}>
-              <DialogTrigger asChild>
-                <Button
-                  className="bg-primary hover:bg-primary/90 text-primary-foreground"
-                  size="sm"
-                  data-testid={`button-join-${podcast.id}`}
-                >
-                  Join Live
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-md">
-                <DialogHeader>
-                  <DialogTitle>Live Podcast Player</DialogTitle>
-                </DialogHeader>
-                <LivePodcastPlayer podcast={podcast} onClose={() => setShowPlayer(false)} />
-              </DialogContent>
-            </Dialog>
+            <>
+              <Button
+                className="bg-primary hover:bg-primary/90 text-primary-foreground"
+                size="sm"
+                onClick={handleJoinClick}
+                data-testid={`button-join-${podcast.id}`}
+              >
+                {isHost || isGuest ? 'Broadcast' : 'Listen'}
+              </Button>
+              
+              <Dialog open={showPlayer} onOpenChange={setShowPlayer}>
+                <DialogContent className="max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>Live Podcast Player</DialogTitle>
+                  </DialogHeader>
+                  <LivePodcastPlayer podcast={podcast} onClose={() => setShowPlayer(false)} />
+                </DialogContent>
+              </Dialog>
+              
+              <Dialog open={showBroadcastStudio} onOpenChange={setShowBroadcastStudio}>
+                <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
+                  <DialogHeader>
+                    <DialogTitle>Live Broadcast Studio</DialogTitle>
+                  </DialogHeader>
+                  {user && (
+                    <LiveBroadcastStudio 
+                      podcast={podcast} 
+                      user={user} 
+                      onClose={() => setShowBroadcastStudio(false)} 
+                    />
+                  )}
+                </DialogContent>
+              </Dialog>
+            </>
           ) : (
             <Button
               className="bg-primary hover:bg-primary/90 text-primary-foreground"

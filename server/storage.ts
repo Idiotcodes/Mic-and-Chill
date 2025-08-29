@@ -16,6 +16,7 @@ import { eq, desc, asc, and, sql } from "drizzle-orm";
 export interface IStorage {
   // User operations (mandatory for Replit Auth)
   getUser(id: string): Promise<User | undefined>;
+  getUserByUsername(username: string): Promise<User | undefined>;
   upsertUser(user: UpsertUser): Promise<User>;
   getAllUsers(): Promise<User[]>;
   updateUserRole(id: string, role: string): Promise<User>;
@@ -51,6 +52,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async upsertUser(userData: UpsertUser): Promise<User> {
+    // Generate username if not provided
+    if (!userData.username && userData.email) {
+      userData.username = userData.email.split('@')[0];
+    } else if (!userData.username && userData.firstName) {
+      userData.username = userData.firstName.toLowerCase().replace(/\s+/g, '');
+    }
+    
     const [user] = await db
       .insert(users)
       .values(userData)
@@ -67,6 +75,11 @@ export class DatabaseStorage implements IStorage {
 
   async getAllUsers(): Promise<User[]> {
     return await db.select().from(users).orderBy(desc(users.createdAt));
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user;
   }
 
   async updateUserRole(id: string, role: string): Promise<User> {
