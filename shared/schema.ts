@@ -111,6 +111,11 @@ export const insertPodcastSchema = createInsertSchema(podcasts).omit({
   listenerCount: true,
 });
 
+export const updatePodcastSchema = createInsertSchema(podcasts).omit({
+  id: true,
+  createdAt: true,
+}).partial();
+
 export const insertPodcastGuestSchema = createInsertSchema(podcastGuests).omit({
   id: true,
   createdAt: true,
@@ -122,6 +127,7 @@ export type User = typeof users.$inferSelect;
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type Podcast = typeof podcasts.$inferSelect;
 export type InsertPodcast = z.infer<typeof insertPodcastSchema>;
+export type UpdatePodcast = z.infer<typeof updatePodcastSchema>;
 export type PodcastGuest = typeof podcastGuests.$inferSelect;
 export type InsertPodcastGuest = z.infer<typeof insertPodcastGuestSchema>;
 

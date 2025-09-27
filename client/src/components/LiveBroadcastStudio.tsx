@@ -53,24 +53,49 @@ export default function LiveBroadcastStudio({ podcast, user, onClose }: LiveBroa
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     
+    console.log('Connecting to WebSocket:', wsUrl);
     wsRef.current = new WebSocket(wsUrl);
     
     wsRef.current.onopen = () => {
+      console.log('WebSocket connected');
       // Join the podcast room
       wsRef.current?.send(JSON.stringify({
         type: 'join-podcast',
         podcastId: podcast.id,
         userId: user.id,
-        role: userRole
+        role: userRole,
+        userInfo: {
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email
+        }
       }));
     };
     
     wsRef.current.onmessage = (event) => {
       const message = JSON.parse(event.data);
+      console.log('WebSocket message received:', message.type);
       handleWebSocketMessage(message);
     };
     
+    wsRef.current.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      toast({
+        title: "Connection Error",
+        description: "Failed to connect to live stream server",
+        variant: "destructive"
+      });
+    };
+    
     return () => {
+      // Leave podcast when unmounting
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'leave-podcast',
+          podcastId: podcast.id,
+          userId: user.id
+        }));
+      }
       wsRef.current?.close();
     };
   }, [podcast.id, user.id, userRole]);
@@ -110,12 +135,41 @@ export default function LiveBroadcastStudio({ podcast, user, onClose }: LiveBroa
 
   const handleWebSocketMessage = async (message: any) => {
     switch (message.type) {
+      case 'room-joined':
+        console.log('Joined room with members:', message.members);
+        // Initialize peer connections with existing members
+        for (const member of message.members) {
+          if (member.userId !== user.id && (userRole === 'host' || userRole === 'guest')) {
+            await initiatePeerConnection(member.userId, member.role);
+          }
+        }
+        break;
+        
       case 'user-joined':
-        setListenerCount(prev => prev + 1);
+        console.log('User joined:', message.userId, message.role);
+        if (message.role === 'listener') {
+          setListenerCount(prev => prev + 1);
+        }
         toast({
           title: `${message.role === 'listener' ? 'Listener' : 'Participant'} joined`,
-          description: `Someone joined the podcast`
+          description: `${message.userInfo?.firstName || 'Someone'} joined the podcast`
         });
+        
+        // If we're a broadcaster and they're not a listener, create peer connection
+        if ((userRole === 'host' || userRole === 'guest') && message.role !== 'listener') {
+          await initiatePeerConnection(message.userId, message.role);
+        }
+        break;
+        
+      case 'user-left':
+        console.log('User left:', message.userId);
+        setListenerCount(prev => Math.max(0, prev - 1));
+        // Clean up peer connection
+        const peer = peersRef.current.get(message.userId);
+        if (peer) {
+          peer.close();
+          peersRef.current.delete(message.userId);
+        }
         break;
         
       case 'webrtc-offer':
@@ -134,15 +188,51 @@ export default function LiveBroadcastStudio({ podcast, user, onClose }: LiveBroa
       case 'unmute-audio':
         updateUserMuteStatus(message.userId, message.muted);
         break;
+        
+      case 'error':
+        console.error('WebSocket error:', message.message);
+        toast({
+          title: "Connection Error",
+          description: message.message,
+          variant: "destructive"
+        });
+        break;
     }
+  };
+
+  const initiatePeerConnection = async (targetUserId: string, targetRole: string) => {
+    if (peersRef.current.has(targetUserId)) return; // Already connected
+    
+    const peerConnection = createPeerConnection(targetUserId);
+    
+    // Add local stream tracks if we're a broadcaster
+    if (localStreamRef.current && (userRole === 'host' || userRole === 'guest')) {
+      localStreamRef.current.getTracks().forEach(track => {
+        peerConnection.addTrack(track, localStreamRef.current!);
+      });
+    }
+    
+    // Create and send offer
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    
+    wsRef.current?.send(JSON.stringify({
+      type: 'webrtc-offer',
+      offer,
+      targetUserId,
+      userId: user.id
+    }));
   };
 
   const handleWebRTCOffer = async (message: any) => {
     // Handle incoming WebRTC offer for peer-to-peer connection
+    console.log('Received WebRTC offer from:', message.fromUserId);
     const peerConnection = createPeerConnection(message.fromUserId);
-    await peerConnection.setRemoteDescription(message.offer);
     
-    if (localStreamRef.current) {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+    
+    // Add local stream tracks if we're a broadcaster
+    if (localStreamRef.current && (userRole === 'host' || userRole === 'guest')) {
       localStreamRef.current.getTracks().forEach(track => {
         peerConnection.addTrack(track, localStreamRef.current!);
       });
@@ -154,21 +244,24 @@ export default function LiveBroadcastStudio({ podcast, user, onClose }: LiveBroa
     wsRef.current?.send(JSON.stringify({
       type: 'webrtc-answer',
       answer,
+      targetUserId: message.fromUserId,
       userId: user.id
     }));
   };
 
   const handleWebRTCAnswer = async (message: any) => {
+    console.log('Received WebRTC answer from:', message.fromUserId);
     const peerConnection = peersRef.current.get(message.fromUserId);
     if (peerConnection) {
-      await peerConnection.setRemoteDescription(message.answer);
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
     }
   };
 
   const handleICECandidate = async (message: any) => {
+    console.log('Received ICE candidate from:', message.fromUserId);
     const peerConnection = peersRef.current.get(message.fromUserId);
-    if (peerConnection) {
-      await peerConnection.addIceCandidate(message.candidate);
+    if (peerConnection && message.candidate) {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
     }
   };
 
@@ -176,25 +269,71 @@ export default function LiveBroadcastStudio({ podcast, user, onClose }: LiveBroa
     const peerConnection = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' }
       ]
     });
     
     peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log('Sending ICE candidate to:', userId);
         wsRef.current?.send(JSON.stringify({
           type: 'webrtc-candidate',
           candidate: event.candidate,
+          targetUserId: userId,
           userId: user.id
         }));
       }
     };
     
     peerConnection.ontrack = (event) => {
-      // Play incoming audio from other participants
-      const audio = new Audio();
+      console.log('Received remote track from:', userId);
+      // Create audio element for incoming stream
+      const audio = document.createElement('audio');
       audio.srcObject = event.streams[0];
-      audio.play().catch(console.error);
+      audio.autoplay = true;
+      audio.volume = volume[0] / 100;
+      audio.setAttribute('data-user-id', userId);
+      
+      // Add to DOM (hidden)
+      audio.style.display = 'none';
+      document.body.appendChild(audio);
+      
+      // Play audio
+      audio.play().catch(error => {
+        console.error('Error playing remote audio:', error);
+        // Try to play again after user interaction
+        const playAudio = () => {
+          audio.play().catch(console.error);
+          document.removeEventListener('click', playAudio);
+        };
+        document.addEventListener('click', playAudio);
+      });
+      
+      // Update connected users list
+      setConnectedUsers(prev => {
+        const existing = prev.find(u => u.userId === userId);
+        if (existing) return prev;
+        return [...prev, {
+          userId,
+          connection: peerConnection,
+          role: 'guest', // We'll update this from WebSocket messages
+          isMuted: false
+        }];
+      });
+    };
+    
+    peerConnection.onconnectionstatechange = () => {
+      console.log(`Peer connection state with ${userId}:`, peerConnection.connectionState);
+      if (peerConnection.connectionState === 'disconnected' || 
+          peerConnection.connectionState === 'failed') {
+        // Clean up
+        const audioElement = document.querySelector(`audio[data-user-id="${userId}"]`);
+        if (audioElement) {
+          audioElement.remove();
+        }
+        setConnectedUsers(prev => prev.filter(u => u.userId !== userId));
+      }
     };
     
     peersRef.current.set(userId, peerConnection);
@@ -207,21 +346,39 @@ export default function LiveBroadcastStudio({ podcast, user, onClose }: LiveBroa
         user.userId === userId ? { ...user, isMuted: muted } : user
       )
     );
+    
+    // Update audio element volume if it exists
+    const audioElement = document.querySelector(`audio[data-user-id="${userId}"]`) as HTMLAudioElement;
+    if (audioElement) {
+      audioElement.muted = muted;
+    }
   };
+  
+  // Update volume for all remote audio streams
+  useEffect(() => {
+    const audioElements = document.querySelectorAll('audio[data-user-id]') as NodeListOf<HTMLAudioElement>;
+    audioElements.forEach(audio => {
+      audio.volume = volume[0] / 100;
+    });
+  }, [volume]);
 
   const toggleMute = () => {
     if (localStreamRef.current) {
       localStreamRef.current.getAudioTracks().forEach(track => {
-        track.enabled = isMuted; // Toggle enabled state
+        track.enabled = isMuted; // Toggle enabled state (if currently muted, enable it)
       });
       
-      setIsMuted(!isMuted);
+      const newMutedState = !isMuted;
+      setIsMuted(newMutedState);
       
       // Broadcast mute status
       wsRef.current?.send(JSON.stringify({
-        type: isMuted ? 'unmute-audio' : 'mute-audio',
-        userId: user.id
+        type: newMutedState ? 'mute-audio' : 'unmute-audio',
+        userId: user.id,
+        podcastId: podcast.id
       }));
+      
+      console.log(newMutedState ? 'Muted microphone' : 'Unmuted microphone');
     }
   };
 

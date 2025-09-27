@@ -6,6 +6,7 @@ import {
   type UpsertUser,
   type Podcast,
   type InsertPodcast,
+  type UpdatePodcast,
   type PodcastGuest,
   type InsertPodcastGuest,
   type PodcastWithHost,
@@ -27,7 +28,7 @@ export interface IStorage {
   getUpcomingPodcasts(): Promise<PodcastWithHost[]>;
   getPodcast(id: string): Promise<PodcastWithHost | undefined>;
   createPodcast(podcast: InsertPodcast): Promise<Podcast>;
-  updatePodcast(id: string, updates: Partial<InsertPodcast>): Promise<Podcast>;
+  updatePodcast(id: string, updates: Partial<UpdatePodcast>): Promise<Podcast>;
   deletePodcast(id: string): Promise<void>;
   
   // Podcast guest operations
@@ -102,10 +103,18 @@ export class DatabaseStorage implements IStorage {
       .leftJoin(users, eq(podcasts.hostId, users.id))
       .orderBy(desc(podcasts.createdAt));
 
-    return result.map(({ podcast, host }) => ({
+    const podcastsWithHosts = result.map(({ podcast, host }) => ({
       ...podcast,
       host: host!,
+      guests: [] as (PodcastGuest & { guest: User })[]
     }));
+
+    // Fetch guests for each podcast
+    for (const podcast of podcastsWithHosts) {
+      podcast.guests = await this.getPodcastGuests(podcast.id);
+    }
+
+    return podcastsWithHosts;
   }
 
   async getLivePodcasts(): Promise<PodcastWithHost[]> {
@@ -119,10 +128,18 @@ export class DatabaseStorage implements IStorage {
       .where(eq(podcasts.status, 'live'))
       .orderBy(desc(podcasts.startedAt));
 
-    return result.map(({ podcast, host }) => ({
+    const podcastsWithHosts = result.map(({ podcast, host }) => ({
       ...podcast,
       host: host!,
+      guests: [] as (PodcastGuest & { guest: User })[]
     }));
+
+    // Fetch guests for each podcast
+    for (const podcast of podcastsWithHosts) {
+      podcast.guests = await this.getPodcastGuests(podcast.id);
+    }
+
+    return podcastsWithHosts;
   }
 
   async getUpcomingPodcasts(): Promise<PodcastWithHost[]> {
@@ -136,10 +153,18 @@ export class DatabaseStorage implements IStorage {
       .where(eq(podcasts.status, 'scheduled'))
       .orderBy(asc(podcasts.scheduledAt));
 
-    return result.map(({ podcast, host }) => ({
+    const podcastsWithHosts = result.map(({ podcast, host }) => ({
       ...podcast,
       host: host!,
+      guests: [] as (PodcastGuest & { guest: User })[]
     }));
+
+    // Fetch guests for each podcast
+    for (const podcast of podcastsWithHosts) {
+      podcast.guests = await this.getPodcastGuests(podcast.id);
+    }
+
+    return podcastsWithHosts;
   }
 
   async getPodcast(id: string): Promise<PodcastWithHost | undefined> {
@@ -171,7 +196,7 @@ export class DatabaseStorage implements IStorage {
     return newPodcast;
   }
 
-  async updatePodcast(id: string, updates: Partial<InsertPodcast>): Promise<Podcast> {
+  async updatePodcast(id: string, updates: Partial<UpdatePodcast>): Promise<Podcast> {
     const [updatedPodcast] = await db
       .update(podcasts)
       .set({ ...updates, updatedAt: new Date() })

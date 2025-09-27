@@ -9,6 +9,7 @@ import { z } from "zod";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import { parse as parseUrl } from "url";
 
 // Setup multer for file uploads
 const upload = multer({
@@ -25,6 +26,22 @@ const upload = multer({
     }
   },
 });
+
+// Authorization helper function
+function checkPodcastPermissions(user: any, podcast: any, requiredRoles: string[] = []) {
+  if (!user || !podcast) return false;
+  
+  const isHost = podcast.hostId === user.id;
+  const isGuest = podcast.guests?.some((g: any) => g.guestId === user.id);
+  const isAdmin = user.role === 'admin';
+  
+  if (isAdmin) return true; // Admins can do everything
+  if (requiredRoles.includes('host') && isHost) return true;
+  if (requiredRoles.includes('guest') && isGuest) return true;
+  if (requiredRoles.includes('participant') && (isHost || isGuest)) return true;
+  
+  return false;
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Auth middleware
@@ -84,7 +101,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!podcast) {
         return res.status(404).json({ message: "Podcast not found" });
       }
-      res.json(podcast);
+      res.json(updatedPodcast);
     } catch (error) {
       console.error("Error fetching podcast:", error);
       res.status(500).json({ message: "Failed to fetch podcast" });
@@ -96,8 +113,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const userId = req.user.claims.sub;
       const user = await storage.getUser(userId);
       
-      if (!user || user.role !== 'admin') {
-        return res.status(403).json({ message: "Admin access required" });
+      // Allow both admins and regular users to create podcasts
+      if (!user) {
+        return res.status(403).json({ message: "Authentication required" });
       }
 
       const validatedData = insertPodcastSchema.parse({
@@ -123,14 +141,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const userId = req.user.claims.sub;
       const user = await storage.getUser(userId);
+      const podcast = await storage.getPodcast(req.params.id);
       
-      if (!user || user.role !== 'admin') {
-        return res.status(403).json({ message: "Admin access required" });
+      if (!user || !podcast) {
+        return res.status(404).json({ message: "User or podcast not found" });
+      }
+      
+      // Check if user has permission to edit this podcast
+      if (!checkPodcastPermissions(user, podcast, ['host'])) {
+        return res.status(403).json({ message: "Only hosts and admins can edit podcasts" });
       }
 
       const updates = insertPodcastSchema.partial().parse(req.body);
-      const podcast = await storage.updatePodcast(req.params.id, updates);
-      res.json(podcast);
+      const updatedPodcast = await storage.updatePodcast(req.params.id, updates);
+      res.json(updatedPodcast);
     } catch (error) {
       if (error instanceof z.ZodError) {
         return res.status(400).json({ 
@@ -147,9 +171,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const userId = req.user.claims.sub;
       const user = await storage.getUser(userId);
+      const podcast = await storage.getPodcast(req.params.id);
       
-      if (!user || user.role !== 'admin') {
-        return res.status(403).json({ message: "Admin access required" });
+      if (!user || !podcast) {
+        return res.status(404).json({ message: "User or podcast not found" });
+      }
+      
+      // Check if user has permission to delete this podcast
+      if (!checkPodcastPermissions(user, podcast, ['host'])) {
+        return res.status(403).json({ message: "Only hosts and admins can delete podcasts" });
       }
 
       await storage.deletePodcast(req.params.id);
@@ -359,68 +389,109 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // WebSocket server for real-time audio signaling
   const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
   
-  // Store active podcast rooms
-  const podcastRooms = new Map<string, Set<WebSocket>>();
-  const userSockets = new Map<string, { ws: WebSocket; userId: string; role: 'host' | 'guest' | 'listener' }>();
+  // Store active podcast rooms and user connections
+  const podcastRooms = new Map<string, Map<string, { ws: WebSocket; userId: string; role: 'host' | 'guest' | 'listener'; userInfo: any }>>();
+  const userToRoom = new Map<string, string>();
+  
+  console.log('WebSocket server initialized on /ws');
   
   wss.on('connection', (ws: WebSocket, req) => {
-    console.log('WebSocket connection established');
+    console.log('WebSocket connection established from:', req.socket.remoteAddress);
     
     ws.on('message', async (data) => {
       try {
         const message = JSON.parse(data.toString());
-        const { type, podcastId, userId, role, offer, answer, candidate } = message;
+        console.log('WebSocket message received:', message.type, { podcastId: message.podcastId, userId: message.userId });
+        
+        const { type, podcastId, userId, role, offer, answer, candidate, targetUserId, userInfo } = message;
         
         switch (type) {
           case 'join-podcast':
-            // Add user to podcast room
-            if (!podcastRooms.has(podcastId)) {
-              podcastRooms.set(podcastId, new Set());
+            // Validate podcast exists
+            const podcast = await storage.getPodcast(podcastId);
+            if (!podcast) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Podcast not found' }));
+              return;
             }
-            podcastRooms.get(podcastId)!.add(ws);
-            userSockets.set(ws.toString(), { ws, userId, role });
             
-            // Notify all users in room
+            // Create room if it doesn't exist
+            if (!podcastRooms.has(podcastId)) {
+              podcastRooms.set(podcastId, new Map());
+            }
+            
+            // Add user to room
+            const room = podcastRooms.get(podcastId)!;
+            room.set(userId, { ws, userId, role, userInfo });
+            userToRoom.set(userId, podcastId);
+            
+            // Send current room members to new user
+            const roomMembers = Array.from(room.values()).map(member => ({
+              userId: member.userId,
+              role: member.role,
+              userInfo: member.userInfo
+            }));
+            
+            ws.send(JSON.stringify({
+              type: 'room-joined',
+              members: roomMembers,
+              podcastId
+            }));
+            
+            // Notify other users about new member
             broadcast(podcastId, {
               type: 'user-joined',
               userId,
-              role
-            }, ws);
+              role,
+              userInfo
+            }, userId);
             
-            // Update listener count if it's a listener
-            if (role === 'listener') {
-              const currentCount = podcastRooms.get(podcastId)?.size || 0;
-              await storage.updatePodcast(podcastId, { 
-                listenerCount: currentCount.toString() 
+            // Update listener count
+            const listenerCount = Array.from(room.values()).filter((m: any) => m.role === 'listener').length;
+            await storage.updatePodcast(podcastId, { 
+              listenerCount: listenerCount.toString() 
+            });
+            
+            console.log(`User ${userId} joined podcast ${podcastId} as ${role}`);
+            break;
+            
+          case 'webrtc-offer':
+            // Forward WebRTC offer to specific target user
+            if (targetUserId) {
+              sendToUser(podcastId, targetUserId, {
+                type: 'webrtc-offer',
+                offer,
+                fromUserId: userId
+              });
+            } else {
+              // Broadcast to all other users if no target specified
+              broadcast(podcastId, {
+                type: 'webrtc-offer',
+                offer,
+                fromUserId: userId
+              }, userId);
+            }
+            break;
+            
+          case 'webrtc-answer':
+            // Forward WebRTC answer to specific user
+            if (targetUserId) {
+              sendToUser(podcastId, targetUserId, {
+                type: 'webrtc-answer',
+                answer,
+                fromUserId: userId
               });
             }
             break;
             
-          case 'webrtc-offer':
-            // Forward WebRTC offer to all users in room
-            broadcast(podcastId, {
-              type: 'webrtc-offer',
-              offer,
-              fromUserId: userId
-            }, ws);
-            break;
-            
-          case 'webrtc-answer':
-            // Forward WebRTC answer
-            broadcast(podcastId, {
-              type: 'webrtc-answer',
-              answer,
-              fromUserId: userId
-            }, ws);
-            break;
-            
           case 'webrtc-candidate':
-            // Forward ICE candidate
-            broadcast(podcastId, {
-              type: 'webrtc-candidate',
-              candidate,
-              fromUserId: userId
-            }, ws);
+            // Forward ICE candidate to specific user
+            if (targetUserId) {
+              sendToUser(podcastId, targetUserId, {
+                type: 'webrtc-candidate',
+                candidate,
+                fromUserId: userId
+              });
+            }
             break;
             
           case 'mute-audio':
@@ -431,7 +502,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 type,
                 userId,
                 muted: type === 'mute-audio'
-              }, ws);
+              }, userId);
             }
             break;
         }
@@ -441,29 +512,58 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
     
     ws.on('close', () => {
-      // Remove user from all rooms
-      for (const [podcastId, room] of podcastRooms.entries()) {
-        if (room.has(ws)) {
-          room.delete(ws);
-          // Update listener count
-          storage.updatePodcast(podcastId, { 
-            listenerCount: room.size.toString() 
-          }).catch(console.error);
+      // Find and remove user from rooms
+      let userIdToRemove = null;
+      let roomToUpdate = null;
+      
+      for (const [podcastId, room] of Array.from(podcastRooms.entries())) {
+        for (const [userId, userInfo] of Array.from(room.entries())) {
+          if (userInfo.ws === ws) {
+            userIdToRemove = userId;
+            roomToUpdate = podcastId;
+            room.delete(userId);
+            userToRoom.delete(userId);
+            
+            // Notify other users
+            broadcast(podcastId, {
+              type: 'user-left',
+              userId
+            }, userId);
+            
+            // Update listener count
+            const listenerCount = Array.from(room.values()).filter((m: any) => m.role === 'listener').length;
+            storage.updatePodcast(podcastId, { 
+              listenerCount: listenerCount.toString() 
+            }).catch(console.error);
+            
+            console.log(`User ${userId} left podcast ${podcastId}`);
+            break;
+          }
         }
+        if (userIdToRemove) break;
       }
-      userSockets.delete(ws.toString());
     });
   });
   
-  function broadcast(podcastId: string, message: any, excludeWs?: WebSocket) {
+  function broadcast(podcastId: string, message: any, excludeUserId?: string) {
     const room = podcastRooms.get(podcastId);
     if (!room) return;
     
     const data = JSON.stringify(message);
-    for (const ws of room) {
-      if (ws !== excludeWs && ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
+    for (const [userId, userInfo] of Array.from(room.entries())) {
+      if (userId !== excludeUserId && userInfo.ws.readyState === WebSocket.OPEN) {
+        userInfo.ws.send(data);
       }
+    }
+  }
+  
+  function sendToUser(podcastId: string, targetUserId: string, message: any) {
+    const room = podcastRooms.get(podcastId);
+    if (!room) return;
+    
+    const targetUser = room.get(targetUserId);
+    if (targetUser && targetUser.ws.readyState === WebSocket.OPEN) {
+      targetUser.ws.send(JSON.stringify(message));
     }
   }
 
