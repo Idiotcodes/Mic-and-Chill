@@ -411,7 +411,7 @@ export default function AdminDashboard() {
                         value={formData.scheduledAt ? formatDateTime(formData.scheduledAt) : ''}
                         onChange={(e) => setFormData({ 
                           ...formData, 
-                          scheduledAt: e.target.value || undefined
+                          scheduledAt: e.target.value ? new Date(e.target.value) : undefined
                         })}
                         data-testid="input-scheduled-time"
                       />
